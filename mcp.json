@@ -1,0 +1,39 @@
+{
+    "mcpServers": {
+      "next-devtools": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "next-devtools-mcp@latest"
+        ]
+      },
+      "Framelink Figma MCP": {
+        "command": "cmd",
+        "args": [
+          "/c",
+          "npx",
+          "-y",
+          "figma-developer-mcp",
+          "--figma-api-key=figd_5-46AAGIuRmZfHH-KTlZseihn9e6pF-wNcOI-uOf",
+          "--stdio"
+        ]
+      },
+      "supabase": {
+        "url": "https://mcp.supabase.com/mcp?project_ref=qrmdsacqlpqjylfyqoky&features=docs%2Caccount%2Cdatabase%2Cdebugging%2Cdevelopment%2Cfunctions%2Cstorage"
+      }
+    },
+    "git mcp": {
+      "servers": {
+        "git": {
+          "command": "uvx",
+          "args": [
+            "mcp-server-git"
+          ]
+        },
+        "github": {
+          "type": "http",
+          "url": "https://api.githubcopilot.com/mcp/"
+        }
+      }
+    }
+  }
