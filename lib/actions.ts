@@ -4,17 +4,10 @@ import { updateTag } from 'next/cache'
 import { createClient } from './server'
 import { unstable_cache } from 'next/cache'
 
-const isDev = process.env.NODE_ENV !== 'production'
+// =====================================================
+// STUDENT PROFILE — Update / Create with Avatar Handling
+// =====================================================
 
-function logError(context: string, error: any) {
-  if (isDev) {
-    console.error(`[ServerAction:${context}]`, error?.message || error)
-  }
-}
-
-/* =====================================================
-   UPDATE STUDENT PROFILE
-   ===================================================== */
 export async function updateStudentProfile(
   userId: string,
   profileData: {
@@ -31,81 +24,95 @@ export async function updateStudentProfile(
     avatar?: string
   }
 ) {
-  if (!userId) {
-    return { success: false, message: 'Missing user ID' }
+  if (!userId) throw new Error('User ID is required')
+
+  const supabase = await createClient()
+
+  console.log('🟢 [updateStudentProfile] Start')
+  console.log('userId:', userId)
+  console.log('profileData:', profileData)
+
+  // Validate avatar (prevent saving invalid paths)
+  if (profileData.avatar && !profileData.avatar.startsWith('http')) {
+    console.warn('⚠️ Skipping invalid avatar URL:', profileData.avatar)
+    delete profileData.avatar
   }
 
-  try {
-    const supabase = await createClient()
-    if (!supabase) throw new Error('Failed to create Supabase client')
+  // Check if the student already exists
+  const { data: existing, error: fetchError } = await supabase
+    .from('students')
+    .select('id')
+    .eq('user_id', userId)
+    .maybeSingle()
 
-    // Attempt to update
-    const { data: updateResult, error: updateError } = await supabase
+  if (fetchError && fetchError.code !== 'PGRST116') {
+    console.error('❌ Failed to fetch existing student:', fetchError.message)
+    throw new Error(fetchError.message)
+  }
+
+  let dbError = null
+
+  if (existing) {
+    console.log('🟡 Student exists — updating record...')
+    const { error } = await supabase
       .from('students')
       .update(profileData)
       .eq('user_id', userId)
-      .select('id')
-
-    if (updateError) {
-      logError('updateStudentProfile:update', updateError)
-    }
-
-    // If no rows updated, insert
-    if (updateError || !updateResult || updateResult.length === 0) {
-      const insertData = { user_id: userId, ...profileData }
-      const { error: insertError } = await supabase.from('students').insert(insertData)
-
-      if (insertError) {
-        logError('updateStudentProfile:insert', insertError)
-        throw new Error(`Failed to create or update profile.`)
-      }
-    }
-
-    // ✅ Invalidate caches
-    updateTag(`student-${userId}`)
-    updateTag('students')
-    updateTag(`profile-${userId}`)
-
-    return { success: true, message: 'Profile updated successfully' }
-  } catch (error: any) {
-    logError('updateStudentProfile:catch', error)
-    return { success: false, message: error?.message || 'Unexpected error updating profile' }
+    dbError = error
+  } else {
+    console.log('🟢 Student not found — creating new record...')
+    const { error } = await supabase
+      .from('students')
+      .insert({ user_id: userId, ...profileData })
+    dbError = error
   }
+
+  if (dbError) {
+    console.error('❌ Database error:', dbError.message)
+    throw new Error(`Failed to save student profile: ${dbError.message}`)
+  }
+
+  // Refresh caches immediately
+  updateTag(`student-${userId}`)
+  updateTag(`profile-${userId}`)
+  updateTag('students')
+
+  console.log('✅ [updateStudentProfile] Success for user:', userId)
+  return { success: true }
 }
 
-/* =====================================================
-   CREATE ENROLLMENT
-   ===================================================== */
+// =====================================================
+// ENROLLMENT — Create with cache invalidation
+// =====================================================
+
 export async function createEnrollment(studentId: string, semesterId: string) {
-  if (!studentId || !semesterId) {
-    return { success: false, message: 'Missing required fields' }
+  const supabase = await createClient()
+
+  const { data, error } = await supabase
+    .from('enrollments')
+    .insert({
+      student_id: studentId,
+      semester_id: semesterId,
+    })
+    .select()
+    .single()
+
+  if (error) {
+    throw new Error(`Failed to create enrollment: ${error.message}`)
   }
 
-  try {
-    const supabase = await createClient()
-    const { data, error } = await supabase
-      .from('enrollments')
-      .insert({ student_id: studentId, semester_id: semesterId })
-      .select()
-      .single()
+  updateTag(`student-${studentId}`)
+  updateTag(`enrollments-${studentId}`)
+  updateTag(`semester-${semesterId}`)
+  updateTag('enrollments')
 
-    if (error) throw error
-
-    updateTag(`student-${studentId}`)
-    updateTag(`enrollments-${studentId}`)
-    updateTag(`semester-${semesterId}`)
-    updateTag('enrollments')
-
-    return { success: true, message: 'Enrollment created', data }
-  } catch (error: any) {
-    logError('createEnrollment', error)
-    return { success: false, message: error?.message || 'Failed to create enrollment' }
-  }
+  return { success: true, enrollment: data }
 }
 
-/* =====================================================
-   UPDATE RESULT
-   ===================================================== */
+// =====================================================
+// RESULT — Update with cache invalidation
+// =====================================================
+
 export async function updateResult(
   resultId: string,
   resultData: {
@@ -116,48 +123,38 @@ export async function updateResult(
     subjects?: string
   }
 ) {
-  if (!resultId) {
-    return { success: false, message: 'Missing result ID' }
+  const supabase = await createClient()
+
+  const { data: currentResult } = await supabase
+    .from('results')
+    .select('student_id, semester_id')
+    .eq('id', resultId)
+    .single()
+
+  const { error } = await supabase
+    .from('results')
+    .update(resultData)
+    .eq('id', resultId)
+
+  if (error) {
+    throw new Error(`Failed to update result: ${error.message}`)
   }
 
-  try {
-    const supabase = await createClient()
-
-    // Get current result to find related IDs
-    const { data: currentResult, error: fetchError } = await supabase
-      .from('results')
-      .select('student_id, semester_id')
-      .eq('id', resultId)
-      .single()
-
-    if (fetchError) throw fetchError
-
-    const { error: updateError } = await supabase
-      .from('results')
-      .update(resultData)
-      .eq('id', resultId)
-
-    if (updateError) throw updateError
-
-    // Refresh cache tags
-    if (currentResult) {
-      updateTag(`student-${currentResult.student_id}`)
-      updateTag(`results-${currentResult.student_id}`)
-      updateTag(`semester-${currentResult.semester_id}`)
-    }
-    updateTag(`result-${resultId}`)
-    updateTag('results')
-
-    return { success: true, message: 'Result updated successfully' }
-  } catch (error: any) {
-    logError('updateResult', error)
-    return { success: false, message: error?.message || 'Failed to update result' }
+  if (currentResult) {
+    updateTag(`student-${currentResult.student_id}`)
+    updateTag(`results-${currentResult.student_id}`)
+    updateTag(`semester-${currentResult.semester_id}`)
   }
+  updateTag(`result-${resultId}`)
+  updateTag('results')
+
+  return { success: true }
 }
 
-/* =====================================================
-   CACHED QUERIES
-   ===================================================== */
+// =====================================================
+// CACHED DATA FETCHING FUNCTIONS
+// =====================================================
+
 export async function getCachedStudent(userId: string) {
   return unstable_cache(
     async () => {
@@ -167,6 +164,7 @@ export async function getCachedStudent(userId: string) {
         .select('*')
         .eq('user_id', userId)
         .single()
+
       if (error) throw error
       return data
     },
@@ -190,6 +188,7 @@ export async function getCachedStudentResults(userId: string) {
         .select('*')
         .eq('student_id', student.id)
         .order('semester', { ascending: true })
+
       if (error) throw error
       return data || []
     },
@@ -207,8 +206,11 @@ export async function getCachedSemesters() {
       const supabase = await createClient()
       const { data, error } = await supabase
         .from('semesters')
-        .select('id, name, description, status, batch, city, mode, course_id, courses(name)')
+        .select(
+          'id, name, description, status, batch, city, mode, course_id, courses(name)'
+        )
         .order('created_at', { ascending: true })
+
       if (error) throw error
 
       return (data || []).map((s: any) => ({
@@ -239,11 +241,15 @@ export async function getCachedLectures() {
         .from('lectures')
         .select('*')
         .order('created_at', { ascending: false })
+
       if (error) throw error
       return data || []
     },
     ['lectures'],
-    { tags: ['lectures'], revalidate: 1800 }
+    {
+      tags: ['lectures'],
+      revalidate: 1800,
+    }
   )()
 }
 
@@ -255,10 +261,14 @@ export async function getCachedAllResults() {
         .from('results')
         .select('*')
         .order('created_at', { ascending: false })
+
       if (error) throw error
       return data || []
     },
     ['all-results'],
-    { tags: ['results', 'all-results'], revalidate: 3600 }
+    {
+      tags: ['results', 'all-results'],
+      revalidate: 3600,
+    }
   )()
 }
