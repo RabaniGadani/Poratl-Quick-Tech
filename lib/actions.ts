@@ -5,9 +5,13 @@ import { createClient } from './server'
 import { unstable_cache } from 'next/cache'
 
 // =====================================================
-// STUDENT PROFILE — Update / Create with Avatar Handling
+// CACHED DATA FETCHING FUNCTIONS (with cache tags)
 // =====================================================
 
+/**
+ * Server Action to update student profile with cache invalidation
+ * Uses updateTag to immediately refresh the cache
+ */
 export async function updateStudentProfile(
   userId: string,
   profileData: {
@@ -24,67 +28,58 @@ export async function updateStudentProfile(
     avatar?: string
   }
 ) {
-  if (!userId) throw new Error('User ID is required')
-
   const supabase = await createClient()
 
-  console.log('🟢 [updateStudentProfile] Start')
-  console.log('userId:', userId)
-  console.log('profileData:', profileData)
-
-  // Validate avatar (prevent saving invalid paths)
-  if (profileData.avatar && !profileData.avatar.startsWith('http')) {
-    console.warn('⚠️ Skipping invalid avatar URL:', profileData.avatar)
-    delete profileData.avatar
-  }
-
-  // Check if the student already exists
-  const { data: existing, error: fetchError } = await supabase
+  // Try to update first
+  const { data: updateDataResult, error: updateError } = await supabase
     .from('students')
-    .select('id')
+    .update(profileData)
     .eq('user_id', userId)
-    .maybeSingle()
+    .select('id')
 
-  if (fetchError && fetchError.code !== 'PGRST116') {
-    console.error('❌ Failed to fetch existing student:', fetchError.message)
-    throw new Error(fetchError.message)
-  }
-
-  let dbError = null
-
-  if (existing) {
-    console.log('🟡 Student exists — updating record...')
-    const { error } = await supabase
+  // If no row was updated, insert new
+  if (updateError) {
+    // If update failed, try to insert
+    const insertData = {
+      user_id: userId,
+      ...profileData,
+    }
+    const { error: insertError } = await supabase
       .from('students')
-      .update(profileData)
-      .eq('user_id', userId)
-    dbError = error
-  } else {
-    console.log('🟢 Student not found — creating new record...')
-    const { error } = await supabase
+      .insert(insertData)
+
+    if (insertError) {
+      throw new Error(`Failed to create profile: ${insertError.message}`)
+    }
+  } else if (!updateDataResult || updateDataResult.length === 0) {
+    // No error but no rows updated, try insert
+    const insertData = {
+      user_id: userId,
+      ...profileData,
+    }
+    const { error: insertError } = await supabase
       .from('students')
-      .insert({ user_id: userId, ...profileData })
-    dbError = error
+      .insert(insertData)
+
+    if (insertError) {
+      throw new Error(`Failed to create profile: ${insertError.message}`)
+    }
   }
 
-  if (dbError) {
-    console.error('❌ Database error:', dbError.message)
-    throw new Error(`Failed to save student profile: ${dbError.message}`)
-  }
-
-  // Refresh caches immediately
+  // Immediately update the cache tag for this student
+  // This ensures the user sees their changes right away
   updateTag(`student-${userId}`)
-  updateTag(`profile-${userId}`)
+  
+  // Also update general cache tags if needed
   updateTag('students')
+  updateTag(`profile-${userId}`)
 
-  console.log('✅ [updateStudentProfile] Success for user:', userId)
   return { success: true }
 }
 
-// =====================================================
-// ENROLLMENT — Create with cache invalidation
-// =====================================================
-
+/**
+ * Server Action to create/update enrollment with cache invalidation
+ */
 export async function createEnrollment(studentId: string, semesterId: string) {
   const supabase = await createClient()
 
@@ -101,6 +96,7 @@ export async function createEnrollment(studentId: string, semesterId: string) {
     throw new Error(`Failed to create enrollment: ${error.message}`)
   }
 
+  // Update cache tags for immediate refresh
   updateTag(`student-${studentId}`)
   updateTag(`enrollments-${studentId}`)
   updateTag(`semester-${semesterId}`)
@@ -109,10 +105,9 @@ export async function createEnrollment(studentId: string, semesterId: string) {
   return { success: true, enrollment: data }
 }
 
-// =====================================================
-// RESULT — Update with cache invalidation
-// =====================================================
-
+/**
+ * Server Action to update result with cache invalidation
+ */
 export async function updateResult(
   resultId: string,
   resultData: {
@@ -125,6 +120,7 @@ export async function updateResult(
 ) {
   const supabase = await createClient()
 
+  // Get current result to find student_id
   const { data: currentResult } = await supabase
     .from('results')
     .select('student_id, semester_id')
@@ -140,6 +136,7 @@ export async function updateResult(
     throw new Error(`Failed to update result: ${error.message}`)
   }
 
+  // Update cache tags
   if (currentResult) {
     updateTag(`student-${currentResult.student_id}`)
     updateTag(`results-${currentResult.student_id}`)
@@ -151,10 +148,9 @@ export async function updateResult(
   return { success: true }
 }
 
-// =====================================================
-// CACHED DATA FETCHING FUNCTIONS
-// =====================================================
-
+/**
+ * Get cached student data with cache tags
+ */
 export async function getCachedStudent(userId: string) {
   return unstable_cache(
     async () => {
@@ -168,15 +164,19 @@ export async function getCachedStudent(userId: string) {
       if (error) throw error
       return data
     },
-    [`student-${userId}`],
+    [`student-${userId}`], // Cache key
     {
-      tags: [`student-${userId}`, `profile-${userId}`],
-      revalidate: 3600,
+      tags: [`student-${userId}`, `profile-${userId}`], // Cache tags
+      revalidate: 3600, // Revalidate after 1 hour (fallback)
     }
   )()
 }
 
+/**
+ * Get cached student results with cache tags
+ */
 export async function getCachedStudentResults(userId: string) {
+  // First get student_id from user_id
   const student = await getCachedStudent(userId)
   if (!student?.id) return []
 
@@ -200,19 +200,20 @@ export async function getCachedStudentResults(userId: string) {
   )()
 }
 
+/**
+ * Get cached semesters with cache tags
+ */
 export async function getCachedSemesters() {
   return unstable_cache(
     async () => {
       const supabase = await createClient()
       const { data, error } = await supabase
         .from('semesters')
-        .select(
-          'id, name, description, status, batch, city, mode, course_id, courses(name)'
-        )
+        .select('id, name, description, status, batch, city, mode, course_id, courses(name)')
         .order('created_at', { ascending: true })
 
       if (error) throw error
-
+      
       return (data || []).map((s: any) => ({
         id: s.id,
         name: s.name,
@@ -233,6 +234,9 @@ export async function getCachedSemesters() {
   )()
 }
 
+/**
+ * Get cached lectures with cache tags
+ */
 export async function getCachedLectures() {
   return unstable_cache(
     async () => {
@@ -248,11 +252,14 @@ export async function getCachedLectures() {
     ['lectures'],
     {
       tags: ['lectures'],
-      revalidate: 1800,
+      revalidate: 1800, // 30 minutes
     }
   )()
 }
 
+/**
+ * Get all cached results with cache tags
+ */
 export async function getCachedAllResults() {
   return unstable_cache(
     async () => {
@@ -272,3 +279,8 @@ export async function getCachedAllResults() {
     }
   )()
 }
+
+/**
+ * Note: For background revalidation (next request), you can use revalidateTag from 'next/cache'
+ * For immediate refresh, use updateTag (which is what we're using above)
+ */
